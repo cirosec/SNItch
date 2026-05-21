@@ -18,7 +18,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const VERSION = "1.3"
+var VERSION = "dev"
 
 var (
 	plainTargets   string
