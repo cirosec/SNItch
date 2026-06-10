@@ -2,7 +2,7 @@
 
 SNI-based host discovery tool for TLS layer reconnaissance. SNItch fuzzes the Server Name Indication (SNI) extension in TLS ClientHello messages to enumerate virtual hosts, bypassing HTTP-layer limitations that tools like ffuf, gobuster, and wfuzz cannot overcome due to their architecture.
 
-Read more in the [blog post](https://cirosec.de/blog/snitch).
+Read more in the [blog post](https://cirosec.de/en/news/fuzzing-vhosts-with-snitch/).
 
 ## Installation
 
