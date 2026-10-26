@@ -5,6 +5,7 @@ import (
 	"github.com/cirosec/snitch/dns"
 	"github.com/cirosec/snitch/helpers"
 	"net"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/log"
@@ -61,11 +62,11 @@ func ProcessTargetHostInputs(dnsResolver dns.DNSResolver, TargetsPath string, Ta
 	}
 
 	allTargets = helpers.RemoveDuplicate(allTargets)
-	//allTargets = helpers.RemoveEmpty(allTargets)
+	allTargets = helpers.RemoveEmpty(allTargets)
 	allTargets, expandedHostnames := targetFormatter(dnsResolver, allTargets)
 	allHosts = append(allHosts, expandedHostnames...)
 	allHosts = helpers.RemoveDuplicate(allHosts)
-	//allTargets = helpers.RemoveEmpty(allHosts)
+	allHosts = helpers.RemoveEmpty(allHosts)
 
 	return allTargets, allHosts
 }
@@ -81,12 +82,12 @@ func targetFormatter(dnsResolver dns.DNSResolver, targets []string) ([]string, [
 		if helpers.IsCIDR(target) {
 			cidr, port, err := helpers.SplitIntoCidrAndPort(target)
 			if err != nil {
-				log.Fatalf("Failed to parse target '%s'", target)
+				log.Warnf("Skipping invalid CIDR target '%s': %v", target, err)
 				continue
 			}
 			ips, err := helpers.ExpandCIDR(cidr)
 			if err != nil {
-				log.Fatalf("Failed to parse target '%s'", target)
+				log.Warnf("Skipping unparsable CIDR target '%s': %v", target, err)
 				continue
 			}
 			for _, ipaddr := range ips {
@@ -105,17 +106,29 @@ func EnsureIpAndPort(dnsResolver dns.DNSResolver, target string) ([]string, stri
 	ret := []string{}
 	hostname := ""
 	port := "443"
-	var err error
 	if strings.Contains(target, ":") {
-		target, port, err = net.SplitHostPort(target)
-		if err != nil {
-			if err.(*net.AddrError).Err == "missing port in address" {
-				port = "443"
+		host, splitPort, splitErr := net.SplitHostPort(target)
+		if splitErr != nil {
+			if addrErr, ok := splitErr.(*net.AddrError); ok && addrErr.Err == "missing port in address" {
+				host = strings.Trim(target, "[]")
+				splitPort = "443"
+			} else if net.ParseIP(target) != nil {
+				// Unbracketed IPv6 literal ("2001:db8::1"): SplitHostPort
+				// cannot dissect it, but it is a valid bare address. A port
+				// can only be attached with brackets ("[2001:db8::1]:8443").
+				host = target
+				splitPort = "443"
 			} else {
-				log.Errorf("Failed to parse host:port '%s'\n%+v", target, err)
+				log.Errorf("Failed to parse host:port '%s'\n%+v", target, splitErr)
 				return []string{}, ""
 			}
 		}
+		portNum, convErr := strconv.Atoi(splitPort)
+		if convErr != nil || portNum < 1 || portNum > 65535 {
+			log.Warnf("Skipping target '%s': invalid port '%s' (must be 1-65535)", target, splitPort)
+			return []string{}, ""
+		}
+		target, port = host, splitPort
 	}
 	var ips []string
 	ips, hostname = EnsureIP(dnsResolver, target)

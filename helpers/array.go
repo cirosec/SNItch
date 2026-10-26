@@ -32,6 +32,15 @@ func Contains(s []string, e string) bool {
 	}
 	return false
 }
+
+func ContainsFold(s []string, e string) bool {
+	for _, a := range s {
+		if strings.EqualFold(a, e) {
+			return true
+		}
+	}
+	return false
+}
 func MetaSplit(s []string, sep string) []string {
 	result := []string{}
 	for _, e := range s {
@@ -41,6 +50,9 @@ func MetaSplit(s []string, sep string) []string {
 }
 
 func ChunkBy[T any](items []T, chunkSize int) (chunks [][]T) {
+	if chunkSize < 1 || len(items) == 0 {
+		return nil
+	}
 	for chunkSize < len(items) {
 		items, chunks = items[chunkSize:], append(chunks, items[0:chunkSize:chunkSize])
 	}

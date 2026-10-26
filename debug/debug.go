@@ -47,12 +47,12 @@ func (d *DebugLogger) Logf(format string, args ...interface{}) {
 }
 
 // ScanConfig logs the scan configuration.
-func (d *DebugLogger) ScanConfig(targets, hosts []string, threads, epochs int, recon, crtsh, ptr bool) {
+func (d *DebugLogger) ScanConfig(targets, hosts []string, threads, epochs int, recon, crtlog, ptr bool) {
 	if d == nil {
 		return
 	}
 	d.logger.Printf("[CONFIG] Targets=[%s] Hosts=[%s]", strings.Join(targets, ", "), strings.Join(hosts, ", "))
-	d.logger.Printf("[CONFIG] Threads=%d Epochs=%d Recon=%t CRTSH=%t PTR=%t", threads, epochs, recon, crtsh, ptr)
+	d.logger.Printf("[CONFIG] Threads=%d Epochs=%d Recon=%t CRTLOG=%t PTR=%t", threads, epochs, recon, crtlog, ptr)
 }
 
 // TargetOnline logs that a target is reachable.
@@ -106,6 +106,18 @@ func (d *DebugLogger) HTTPRequest(target, host string, status int, title, redire
 	d.logger.Printf("[HTTP] %s Host=%q → %d title=%q redirect=%q", target, host, status, title, redirect)
 }
 
+// PlainHTTPRequest logs a plaintext HTTP request to a target IP and its result.
+func (d *DebugLogger) PlainHTTPRequest(target, host, port string, status int, title, redirect string, err error) {
+	if d == nil {
+		return
+	}
+	if err != nil {
+		d.logger.Printf("[HTTP-PLAIN] %s (port %s) Host=%q → error: %s", target, port, host, err.Error())
+		return
+	}
+	d.logger.Printf("[HTTP-PLAIN] %s (port %s) Host=%q → %d title=%q redirect=%q", target, port, host, status, title, redirect)
+}
+
 // PTRResult logs reverse DNS (PTR) lookup results for a single IP.
 func (d *DebugLogger) PTRResult(ip string, hostnames []string) {
 	if d == nil {
@@ -114,16 +126,16 @@ func (d *DebugLogger) PTRResult(ip string, hostnames []string) {
 	d.logger.Printf("[PTR] %s → %v", ip, hostnames)
 }
 
-// CrtshResult logs crt.sh query results for a domain.
-func (d *DebugLogger) CrtshResult(domain string, hostnames []string, err error) {
+// CrtLogResult logs crt.name query results for a domain.
+func (d *DebugLogger) CrtLogResult(domain string, hostnames []string, err error) {
 	if d == nil {
 		return
 	}
 	if err != nil {
-		d.logger.Printf("[CRTSH] %s → error: %s", domain, err.Error())
+		d.logger.Printf("[CRTLOG] %s → error: %s", domain, err.Error())
 		return
 	}
-	d.logger.Printf("[CRTSH] %s → %d hostnames: %v", domain, len(hostnames), hostnames)
+	d.logger.Printf("[CRTLOG] %s → %d hostnames: %v", domain, len(hostnames), hostnames)
 }
 
 // CertRecon logs hostnames discovered from a certificate during recon.

@@ -1,0 +1,99 @@
+{
+  "network": "127.0.42.0/24",
+  "dns": {
+    "listen": "127.0.0.1",
+    "port": 5353,
+    "upstream": ["1.1.1.1", "8.8.8.8"]
+  },
+  "certificates": [
+    { "name": "default.test", "sans": ["default.test"] },
+    { "name": "generic.test", "sans": ["generic.test"] },
+    { "name": "alpha.test", "sans": ["alpha.test", "www.alpha.test", "legacy.alpha.test"] },
+    { "name": "beta.test", "sans": ["beta.test"] },
+    { "name": "portal.test", "sans": ["portal.test"] },
+    { "name": "hop.test", "sans": ["hop.test"] },
+    { "name": "final.test", "sans": ["final.test"] },
+    { "name": "wild.test", "sans": ["wild.test", "*.wild.test"] },
+    { "name": "strict.test", "sans": ["strict.test"] },
+    { "name": "multi.test", "sans": ["multi.test", "service.test"] },
+    { "name": "altport.test", "sans": ["altport.test"] },
+    { "name": "expired.test", "sans": ["expired.test"], "expired": true },
+    { "name": "ip.test", "sans": ["ip.test"], "ips": ["127.0.42.12"] },
+    { "name": "hardened.test", "sans": ["hardened.test"] },
+    { "name": "hidden.test", "sans": ["hidden.test"] }
+  ],
+  "servers": [
+    {
+      "ip": "127.0.42.10",
+      "role": "shared",
+      "description": "Multi-tenant TLS server with a fallback certificate. Unknown or absent SNI returns the fallback certificate (SNIDisconnectsOnRandom = false).",
+      "fallback_cert": "default.test",
+      "ptr_name": "alpha.test",
+      "http_redirect": "https://alpha.test",
+      "sites": [
+        { "server_names": ["alpha.test", "www.alpha.test"], "cert": "alpha.test", "status": 200, "title": "Alpha Service" },
+        { "server_names": ["legacy.alpha.test"], "cert": "alpha.test", "status": 200, "title": "Legacy Service", "no_supply": true, "no_dns": true },
+        { "server_names": ["beta.test"], "cert": "beta.test", "status": 200, "title": "Beta Service" },
+        { "server_names": ["wild.test", "*.wild.test"], "cert": "wild.test", "status": 200, "title": "Wildcard Service" },
+        { "server_names": ["portal.test"], "cert": "portal.test", "status": 301, "redirect": "https://hop.test/login" },
+        { "server_names": ["hop.test"], "cert": "hop.test", "status": 301, "redirect": "https://final.test/login", "no_supply": true },
+        { "server_names": ["final.test"], "cert": "final.test", "status": 200, "title": "Final Service", "no_supply": true }
+      ]
+    },
+    {
+      "ip": "127.0.42.11",
+      "role": "strict",
+      "description": "SNI-strict server. Unknown and absent SNI are rejected with a TLS alert (SNIDisconnectsOnRandom = true). Plain HTTP still reveals the canonical host.",
+      "fallback_cert": null,
+      "ptr_name": "strict.test",
+      "http_redirect": "https://strict.test",
+      "sites": [
+        { "server_names": ["strict.test"], "cert": "strict.test", "status": 200, "title": "Strict Service" }
+      ]
+    },
+    {
+      "ip": "127.0.42.12",
+      "role": "fallback",
+      "description": "Catch-all server returning a generic fallback certificate, plus a certificate that carries the target IP in its SANs to exercise the IP-as-SNI feature.",
+      "fallback_cert": "generic.test",
+      "ptr_name": "multi.test",
+      "http_redirect": "https://portal.test",
+      "sites": [
+        { "server_names": ["multi.test", "service.test"], "cert": "multi.test", "status": 200, "title": "Multi Service" },
+        { "server_names": ["altport.test"], "cert": "altport.test", "status": 200, "title": "Alt Port Service", "port": 8443 },
+        { "server_names": ["expired.test"], "cert": "expired.test", "status": 200, "title": "Expired Cert Service" },
+        { "server_names": ["127.0.42.12"], "cert": "ip.test", "status": 200, "title": "IP Service", "ip_sni": true }
+      ]
+    },
+    {
+      "ip": "127.0.42.13",
+      "role": "hardened",
+      "description": "Fully hardened server: rejects unknown and absent SNI, presents no fallback certificate, answers plaintext HTTP with nothing (connection closed) and has no DNS/PTR records. An IP-only scan reveals absolutely nothing.",
+      "fallback_cert": null,
+      "no_dns": true,
+      "no_http": true,
+      "expect_no_findings": true,
+      "ptr_name": null,
+      "http_redirect": null,
+      "sites": [
+        { "server_names": ["hardened.test"], "cert": "hardened.test", "status": 200, "title": "Hardened Service" }
+      ]
+    },
+    {
+      "ip": "127.0.42.14",
+      "role": "header-leak",
+      "description": "TLS-hardened server: rejects unknown and absent SNI, presents no fallback certificate and is absent from DNS/PTR. Its plaintext HTTP service still leaks the canonical hostname in a Content-Security-Policy response header, so a scan with --search-headers discovers the vhost through the HTTP layer even though the TLS layer reveals nothing.",
+      "fallback_cert": null,
+      "no_dns": true,
+      "ptr_name": null,
+      "http_redirect": null,
+      "http_title": "Header Leak Service",
+      "http_header_leak": {
+        "Content-Security-Policy": "default-src 'self'; connect-src https://hidden.test"
+      },
+      "sites": [
+        { "server_names": ["hidden.test"], "cert": "hidden.test", "status": 200, "title": "Hidden Service" }
+      ]
+    }
+  ]
+}

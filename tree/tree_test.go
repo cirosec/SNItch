@@ -3,6 +3,8 @@ package tree
 import (
 	"testing"
 
+	"github.com/cirosec/snitch/dns"
+	"github.com/cirosec/snitch/globalcontext"
 	"github.com/cirosec/snitch/scanner"
 )
 
@@ -274,5 +276,125 @@ func TestDomainLabel_ParentNode_WithResult(t *testing.T) {
 	}
 	if label.HttpRedirect() != "https://example.com" {
 		t.Fatalf("expected 'https://example.com', got %q", label.HttpRedirect())
+	}
+}
+
+// The (EMPTY SNI) row must reflect a real no-SNI connection, not the random-SNI
+// HTTP probe, and must not be emitted for a hardened server that rejects an
+// unknown/random SNI.
+func TestRootDomain_Print_EmptySNIRow(t *testing.T) {
+	gctx := globalcontext.NewGlobalContext(dns.NewDNSResolver(""))
+	defer gctx.DNSresolver.Stop()
+
+	r := NewRootDomain()
+	r.result = &scanner.ScannerRootResult{
+		Target:                 "10.0.0.1:443",
+		SNIAllowsMissing:       scanner.TriStateTrue,
+		SNIDisconnectsOnRandom: scanner.TriStateTrue,
+		EmptySNIHttpStatus:     404,
+		EmptySNIHttpTitle:      "No SNI",
+		EmptySNIHttpRedirect:   "",
+		// Random-SNI probe values must NOT leak into the row.
+		HttpStatus:   0,
+		HttpTitle:    "",
+		HttpRedirect: "",
+	}
+
+	table := r.BuildTable(gctx, &PrintConfig{Root: r, Target: "10.0.0.1:443"})
+	rows := table.Rows()
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	row := rows[0]
+	if row.AlternateText == nil || *row.AlternateText != "(EMPTY SNI)" {
+		t.Fatalf("expected (EMPTY SNI) row, got %+v", row)
+	}
+	if row.HTTPStatus == nil || *row.HTTPStatus != 404 {
+		t.Fatalf("expected no-SNI HTTP status 404, got %v", row.HTTPStatus)
+	}
+	if row.HTTPTitle != "No SNI" {
+		t.Fatalf("expected no-SNI title, got %q", row.HTTPTitle)
+	}
+}
+
+// A server that rejects all SNI values (including no/empty SNI and random) is
+// hardened and should produce no (EMPTY SNI) row at all.
+func TestRootDomain_Print_HardenedNoEmptySNIRow(t *testing.T) {
+	gctx := globalcontext.NewGlobalContext(dns.NewDNSResolver(""))
+	defer gctx.DNSresolver.Stop()
+
+	r := NewRootDomain()
+	r.result = &scanner.ScannerRootResult{
+		Target:                 "10.0.0.1:443",
+		SNIAllowsMissing:       scanner.TriStateFalse,
+		SNIAllowsEmptyWithExt:  scanner.TriStateFalse,
+		SNIDisconnectsOnRandom: scanner.TriStateTrue,
+	}
+
+	table := r.BuildTable(gctx, &PrintConfig{Root: r, Target: "10.0.0.1:443"})
+	if len(table.Rows()) != 0 {
+		t.Fatalf("expected no rows for hardened server, got %d", len(table.Rows()))
+	}
+}
+
+// A hostname revealed by the plaintext-HTTP probe against the target's TLS port
+// must surface as its own (HTTP/TLS ...) row.
+func TestRootDomain_Print_PlainHTTPTLSRow(t *testing.T) {
+	gctx := globalcontext.NewGlobalContext(dns.NewDNSResolver(""))
+	defer gctx.DNSresolver.Stop()
+
+	r := NewRootDomain()
+	r.result = &scanner.ScannerRootResult{
+		Target:               "10.0.0.1:443",
+		PlainHTTPTLSHost:     "10.0.0.1",
+		PlainHTTPTLSStatus:   301,
+		PlainHTTPTLSRedirect: "https://leak.example/login",
+	}
+
+	table := r.BuildTable(gctx, &PrintConfig{Root: r, Target: "10.0.0.1:443"})
+	rows := table.Rows()
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	row := rows[0]
+	if row.AlternateText == nil || *row.AlternateText != "(HTTP/TLS 10.0.0.1)" {
+		t.Fatalf("expected (HTTP/TLS ...) row, got %+v", row)
+	}
+	if !row.PlainHTTPTLS {
+		t.Fatalf("expected PlainHTTPTLS row flag")
+	}
+	if row.HTTPStatus == nil || *row.HTTPStatus != 301 {
+		t.Fatalf("expected status 301, got %v", row.HTTPStatus)
+	}
+	report_row := row.ToReport("10.0.0.1:443")
+	if !report_row.PlainHTTPTLS {
+		t.Fatalf("expected plain_http_tls in report record")
+	}
+}
+
+
+// A reveal triggered by the Host-less HTTP/1.0 probe must be labeled "(HTTP
+// no-host)"; with no host in the request, any hostname in the redirect is the
+// server's own configured name.
+func TestRootDomain_Print_PlainHTTPNoHostRow(t *testing.T) {
+	gctx := globalcontext.NewGlobalContext(dns.NewDNSResolver(""))
+	defer gctx.DNSresolver.Stop()
+
+	r := NewRootDomain()
+	r.result = &scanner.ScannerRootResult{
+		Target:              "10.0.0.1:443",
+		PlainHTTPHostNoHost: true,
+		PlainHTTPStatus:     301,
+		PlainHTTPRedirect:   "https://canonical.example/",
+	}
+
+	table := r.BuildTable(gctx, &PrintConfig{Root: r, Target: "10.0.0.1:443"})
+	rows := table.Rows()
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	row := rows[0]
+	if row.AlternateText == nil || *row.AlternateText != "(HTTP no-host)" {
+		t.Fatalf("expected (HTTP no-host) row, got %+v", row)
 	}
 }

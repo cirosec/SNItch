@@ -3,6 +3,7 @@ package helpers
 import (
 	"bufio"
 	"os"
+	"strings"
 )
 
 func ParseListFile(path string) ([]string, error) {
@@ -18,8 +19,9 @@ func ParseListFile(path string) ([]string, error) {
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		t := scanner.Text()
-		if len(t) != 0 {
+		t := strings.TrimSpace(scanner.Text())
+		// Allow blank lines and '#' comments in list files.
+		if len(t) != 0 && !strings.HasPrefix(t, "#") {
 			res = append(res, t)
 		}
 	}

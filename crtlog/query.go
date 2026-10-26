@@ -1,4 +1,4 @@
-package crtsh
+package crtlog
 
 import (
 	"context"
@@ -33,7 +33,7 @@ func SearchByList(ctx context.Context, hostnames []string, isFilteredDomain fnFi
 		// This is required, as this library only accepts domains with protocol prefix
 		u, err := tld.Parse(specialHostname)
 		if err != nil {
-			prefix = prefix + fmt.Sprintf("[crt.sh] %s Failed to parse '%s'\n", color.RedString("╳"), specialHostname)
+			prefix = prefix + fmt.Sprintf("[crt.name] %s Failed to parse '%s'\n", color.RedString("╳"), specialHostname)
 			s.Prefix = prefix
 		} else {
 			if u.TLD != "" && u.Domain != "" {
@@ -51,20 +51,21 @@ func SearchByList(ctx context.Context, hostnames []string, isFilteredDomain fnFi
 	slices.Sort(filteredDomains)
 	collectedHostnames := []string{}
 
-	prefix = prefix + "[crt.sh] 🔺 you can ignore domains using -i \"*.domain.com\"\n"
-	prefix = prefix + fmt.Sprintf("[crt.sh] ⚡ %s\n", strings.Join(filteredDomains, ","))
-	printAfter = fmt.Sprintf("[crt.sh] ⚡ %s\n", strings.Join(filteredDomains, ","))
+	prefix = prefix + "[crt.name] 🔺 you can ignore domains using -i \"*.domain.com\"\n"
+	prefix = prefix + fmt.Sprintf("[crt.name] ⚡ %s\n", strings.Join(filteredDomains, ","))
+	printAfter = fmt.Sprintf("[crt.name] ⚡ %s\n", strings.Join(filteredDomains, ","))
 	s.Prefix = prefix
 	domains = filteredDomains
 
-	db := NewCRTSH(dbPath)
+	db := NewCrtLog(dbPath)
+	defer db.Close()
 
 	for _, domain := range domains {
 		if ctx.Err() != nil {
 			break
 		}
 		s.Suffix = " Fetching certificate data for " + domain
-		results, err := db.Get(ctx, "%."+domain, userAgent) // The "%" prefix is required for the sql wildcard search
+		results, err := db.Get(ctx, domain, userAgent)
 		for _, r := range results {
 			// Remove results which contain spaces, as such results cannot be valid FQDNs
 			//Remove results, which contain upper case letters, as the domains are always stored in lower case
@@ -75,14 +76,13 @@ func SearchByList(ctx context.Context, hostnames []string, isFilteredDomain fnFi
 		}
 
 		if err != nil {
-			debugLog.CrtshResult(domain, nil, err)
+			debugLog.CrtLogResult(domain, nil, err)
 			s.Prefix = s.Prefix + fmt.Sprintf("%s %s %v\n", color.RedString("╳"), domain, err)
 		} else {
-			debugLog.CrtshResult(domain, results, nil)
+			debugLog.CrtLogResult(domain, results, nil)
 			s.Prefix = s.Prefix + fmt.Sprintf("%s %s Found %d hostnames\n", color.GreenString("✔"), domain, len(results))
 		}
 	}
-	db.Close()
 	s.Stop()
 	fmt.Printf("%s", printAfter)
 	return collectedHostnames

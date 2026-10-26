@@ -2,6 +2,7 @@ package dns
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"time"
@@ -13,12 +14,19 @@ type DNSResolver interface {
 	Stop()
 }
 
+type resolveResult struct {
+	ips []net.IP
+	err error
+}
+
 type hostResolver struct {
 	mu       sync.RWMutex
-	cache    map[string][]net.IP
+	cache    map[string]resolveResult
 	addChan  chan string
 	stopChan chan struct{}
+	stopOnce sync.Once
 	resolver *net.Resolver
+	lookup   func(ctx context.Context, hostname string) ([]net.IP, error)
 }
 
 // NewDNSResolver creates a new DNS resolver. If dnsServer is non-empty, all DNS
@@ -26,9 +34,9 @@ type hostResolver struct {
 // The server can be specified as "IP" or "IP:port" (default port 53).
 func NewDNSResolver(dnsServer string) DNSResolver {
 	r := &hostResolver{
-		cache:    make(map[string][]net.IP),
+		cache:    make(map[string]resolveResult),
 		addChan:  make(chan string, 1024*1024),
-		stopChan: make(chan struct{}, 10),
+		stopChan: make(chan struct{}),
 	}
 
 	if dnsServer != "" {
@@ -39,8 +47,11 @@ func NewDNSResolver(dnsServer string) DNSResolver {
 		customResolver := &net.Resolver{
 			PreferGo: true,
 			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				if network == "" {
+					network = "udp"
+				}
 				d := net.Dialer{Timeout: 10 * time.Second}
-				return d.DialContext(ctx, "udp", dnsServer)
+				return d.DialContext(ctx, network, dnsServer)
 			},
 		}
 		r.resolver = customResolver
@@ -50,34 +61,56 @@ func NewDNSResolver(dnsServer string) DNSResolver {
 	} else {
 		r.resolver = net.DefaultResolver
 	}
+	r.lookup = r.systemLookup
 
 	go r.backgroundResolver()
 	return r
 }
 
+// systemLookup resolves hostnames through the configured net.Resolver.
+func (r *hostResolver) systemLookup(ctx context.Context, hostname string) ([]net.IP, error) {
+	addrs, err := r.resolver.LookupIPAddr(ctx, hostname)
+	if err != nil {
+		return nil, err
+	}
+	ips := make([]net.IP, len(addrs))
+	for i, addr := range addrs {
+		ips[i] = addr.IP
+	}
+	return ips, nil
+}
+
 func (r *hostResolver) Resolve(hostname string) ([]net.IP, error) {
 	r.mu.RLock()
-	ips, ok := r.cache[hostname]
+	result, ok := r.cache[hostname]
 	r.mu.RUnlock()
 
 	if ok {
-		return ips, nil
+		// Failures are cached with their error so a repeated lookup of an
+		// unresolvable name reports the failure instead of an empty success.
+		return result.ips, result.err
 	}
 
-	ips, err := r.lookupIP(hostname)
-	if err != nil {
-		ips = []net.IP{}
-	}
+	result = r.lookupIP(hostname)
 
 	r.mu.Lock()
-	r.cache[hostname] = ips
+	r.cache[hostname] = result
 	r.mu.Unlock()
-	return ips, err
+	return result.ips, result.err
 }
 
 func (r *hostResolver) AddHostname(hostname string) error {
-	r.addChan <- hostname
-	return nil
+	select {
+	case <-r.stopChan:
+		return errors.New("dns resolver is stopped")
+	default:
+	}
+	select {
+	case r.addChan <- hostname:
+		return nil
+	case <-r.stopChan:
+		return errors.New("dns resolver is stopped")
+	}
 }
 
 func (r *hostResolver) backgroundResolver() {
@@ -91,31 +124,30 @@ func (r *hostResolver) backgroundResolver() {
 			r.mu.RUnlock()
 			if !ok {
 				// No entry --> lookup hostname
-				ips, err := r.lookupIP(hostname)
-				if err != nil {
-					ips = []net.IP{}
-				}
+				result := r.lookupIP(hostname)
 				r.mu.Lock()
-				r.cache[hostname] = ips
+				r.cache[hostname] = result
 				r.mu.Unlock()
 			}
 		}
 	}
 }
 
-// lookupIP resolves a hostname using the configured resolver.
-func (r *hostResolver) lookupIP(hostname string) ([]net.IP, error) {
-	addrs, err := r.resolver.LookupIPAddr(context.Background(), hostname)
+// lookupIP resolves a hostname through the injectable lookup function with a
+// deadline, so lookups cannot hang indefinitely.
+func (r *hostResolver) lookupIP(hostname string) resolveResult {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	ips, err := r.lookup(ctx, hostname)
 	if err != nil {
-		return nil, err
+		return resolveResult{ips: []net.IP{}, err: err}
 	}
-	ips := make([]net.IP, len(addrs))
-	for i, addr := range addrs {
-		ips[i] = addr.IP
+	if ips == nil {
+		ips = []net.IP{}
 	}
-	return ips, nil
+	return resolveResult{ips: ips}
 }
 
 func (r *hostResolver) Stop() {
-	close(r.stopChan)
+	r.stopOnce.Do(func() { close(r.stopChan) })
 }

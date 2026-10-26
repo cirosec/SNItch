@@ -1,9 +1,11 @@
 package scan
 
 import (
+	"strings"
+	"sync"
+
 	"github.com/cirosec/snitch/helpers"
 	"github.com/cirosec/snitch/models"
-	"sync"
 )
 
 type ScanContext struct {
@@ -80,12 +82,25 @@ func (h *ScanContext) isIgnoredFQDN(fqdn string) bool {
 }
 
 func (h *ScanContext) AddFQDN(fqdn string) {
+	// Trim and validate so malformed names (stray whitespace etc.) never enter
+	// the queue.
+	fqdn, ok := helpers.SanitizeHostname(fqdn)
+	if !ok {
+		return
+	}
 	if h.isIgnoredFQDN(fqdn) {
+		return
+	}
+	// IP literals (including bracketed IPv6) are addresses, not hostnames.
+	if helpers.IsIPLiteral(fqdn) {
 		return
 	}
 	sld, err := helpers.FQDNToSLD(fqdn)
 	if err != nil {
-		return
+		// Tolerate syntactically valid hostnames that lack a known public
+		// suffix (single labels like "synology", internal names, etc.) by
+		// treating the whole name as its own domain root.
+		sld = strings.TrimPrefix(fqdn, "*.")
 	}
 	h.hostsLock.Lock()
 	defer h.hostsLock.Unlock()

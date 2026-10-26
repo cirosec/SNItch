@@ -1,0 +1,74 @@
+# SNItch test environment.
+#
+# Linux-only by design: all services use `network_mode: host` so nginx/Caddy
+# can bind the individual 127.0.42.0/24 addresses (the loopback interface owns
+# the whole 127.0.0.0/8 range) and the DNS service listens on 127.0.0.1:5353.
+#
+# Two mutually exclusive TLS stacks are provided via compose profiles:
+#   docker compose --profile nginx up -d --build
+#   docker compose --profile caddy up -d --build
+# The DNS service is always started.
+name: snitch-testenv
+
+services:
+  dns:
+    build:
+      context: ./dns
+    network_mode: host
+    volumes:
+      - ./generated/dns/dnsmasq.conf:/etc/dnsmasq.conf:ro
+
+  nginx:
+    profiles: ["nginx"]
+    image: nginx:1.27-alpine
+    network_mode: host
+    volumes:
+      - ./generated/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./generated/nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./certs:/etc/nginx/certs:ro
+
+  # Caddy runs one instance per IP. Caddy chooses certificates from a
+  # process-global cache, so a single instance would present any loaded
+  # certificate on every listener and defeat the per-IP isolation (in
+  # particular the hardened 127.42.0.13 and header-leak 127.42.0.14 servers).
+  # One instance per IP keeps the certificate sets isolated, matching nginx's
+  # per-listener SNI routing.
+  caddy10:
+    profiles: ["caddy"]
+    image: caddy:2.8-alpine
+    network_mode: host
+    volumes:
+      - ./generated/caddy/127.0.42.10.Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/etc/caddy/certs:ro
+
+  caddy11:
+    profiles: ["caddy"]
+    image: caddy:2.8-alpine
+    network_mode: host
+    volumes:
+      - ./generated/caddy/127.0.42.11.Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/etc/caddy/certs:ro
+
+  caddy12:
+    profiles: ["caddy"]
+    image: caddy:2.8-alpine
+    network_mode: host
+    volumes:
+      - ./generated/caddy/127.0.42.12.Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/etc/caddy/certs:ro
+
+  caddy13:
+    profiles: ["caddy"]
+    image: caddy:2.8-alpine
+    network_mode: host
+    volumes:
+      - ./generated/caddy/127.0.42.13.Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/etc/caddy/certs:ro
+
+  caddy14:
+    profiles: ["caddy"]
+    image: caddy:2.8-alpine
+    network_mode: host
+    volumes:
+      - ./generated/caddy/127.0.42.14.Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/etc/caddy/certs:ro

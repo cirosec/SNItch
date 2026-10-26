@@ -23,3 +23,9 @@ hosts*.txt
 # .vscode
 .vscode/
 snitch_debug_*
+
+# Wild /24 scan helper (untracked by design)
+testenv/wild.sh
+testenv/results/
+# Reference resources (RFC text, vendored source copies)
+.ressources/

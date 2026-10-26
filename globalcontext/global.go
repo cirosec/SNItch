@@ -11,26 +11,34 @@ import (
 )
 
 type GlobalContext struct {
-	Certificates         map[string]*x509.Certificate
+	Certificates          map[string]*x509.Certificate
 	CertificateOccurrence map[string][]string
-	certificateLock      sync.Mutex
-	redirectHosts        []string
-	redirectLock         sync.Mutex
-	headerHosts          []string
-	headerLock           sync.Mutex
-	SearchHeaders        bool
-	Whois                whois.WHOISCache
-	DNSresolver          dns.DNSResolver
-	DebugLog             *debug.DebugLogger
-	Timeout              time.Duration
-	UserAgent            string
+	certificateLock       sync.Mutex
+	reflectedCerts        map[string]bool // serials of certificates that echo the requested SNI (dynamic issuer)
+	dynamicTargets        map[string]bool // targets whose server issues a per-SNI certificate
+	httpReflectTargets    map[string]bool // targets whose server reflects the requested Host into redirects
+	reflectedLock         sync.Mutex
+	redirectHosts         []string
+	redirectLock          sync.Mutex
+	headerHosts           []string
+	headerLock            sync.Mutex
+	SearchHeaders         bool
+	Whois                 whois.WHOISCache
+	DNSresolver           dns.DNSResolver
+	DebugLog              *debug.DebugLogger
+	Timeout               time.Duration
+	UserAgent             string
 }
 
 func NewGlobalContext(dnsResolver dns.DNSResolver) *GlobalContext {
-	return &GlobalContext{DNSresolver: dnsResolver, Whois: *whois.NewWHOISCache(), certificateLock: sync.Mutex{}, Certificates: make(map[string]*x509.Certificate), CertificateOccurrence: make(map[string][]string)}
+	return &GlobalContext{DNSresolver: dnsResolver, Whois: *whois.NewWHOISCache(), certificateLock: sync.Mutex{}, Certificates: make(map[string]*x509.Certificate), CertificateOccurrence: make(map[string][]string), reflectedCerts: make(map[string]bool), dynamicTargets: make(map[string]bool), httpReflectTargets: make(map[string]bool)}
 }
 
 func (g *GlobalContext) AddRedirect(redirect string) {
+	redirect, ok := helpers.SanitizeHostname(redirect)
+	if !ok {
+		return
+	}
 	g.redirectLock.Lock()
 	defer g.redirectLock.Unlock()
 	g.redirectHosts = append(g.redirectHosts, redirect)
@@ -64,16 +72,102 @@ func (g *GlobalContext) RegisterCertificate(certificate *x509.Certificate) {
 	}
 }
 
+// MarkReflectedCertificate records that the certificate with the given serial
+// was issued in response to an unknown/random SNI and merely echoes that name.
+// Names from such certificates must not be fed back into recon.
+func (g *GlobalContext) MarkReflectedCertificate(serial string) {
+	g.reflectedLock.Lock()
+	defer g.reflectedLock.Unlock()
+	if g.reflectedCerts == nil {
+		g.reflectedCerts = make(map[string]bool)
+	}
+	g.reflectedCerts[serial] = true
+}
+
+// IsReflectedCertificate reports whether the certificate with the given serial
+// was flagged as a reflected (per-SNI dynamically issued) certificate.
+func (g *GlobalContext) IsReflectedCertificate(serial string) bool {
+	g.reflectedLock.Lock()
+	defer g.reflectedLock.Unlock()
+	return g.reflectedCerts[serial]
+}
+
+// MarkDynamicTarget records that the server behind target issues a distinct
+// certificate per SNI. Hostnames validated against such a target are
+// reflections and must not be reported as findings.
+func (g *GlobalContext) MarkDynamicTarget(target string) {
+	g.reflectedLock.Lock()
+	defer g.reflectedLock.Unlock()
+	if g.dynamicTargets == nil {
+		g.dynamicTargets = make(map[string]bool)
+	}
+	g.dynamicTargets[target] = true
+}
+
+// TargetIssuesRandomCerts reports whether target was flagged as issuing a
+// per-SNI (dynamic) certificate.
+func (g *GlobalContext) TargetIssuesRandomCerts(target string) bool {
+	g.reflectedLock.Lock()
+	defer g.reflectedLock.Unlock()
+	return g.dynamicTargets[target]
+}
+
+// MarkHTTPReflectingTarget records that the server behind target reflects the
+// requested Host back in its redirect (a catch-all), so redirect-based host
+// discovery against it is not a real finding.
+func (g *GlobalContext) MarkHTTPReflectingTarget(target string) {
+	g.reflectedLock.Lock()
+	defer g.reflectedLock.Unlock()
+	if g.httpReflectTargets == nil {
+		g.httpReflectTargets = make(map[string]bool)
+	}
+	g.httpReflectTargets[target] = true
+}
+
+// TargetReflectsHost reports whether target was flagged as reflecting the
+// requested Host into its HTTP redirects.
+func (g *GlobalContext) TargetReflectsHost(target string) bool {
+	g.reflectedLock.Lock()
+	defer g.reflectedLock.Unlock()
+	return g.httpReflectTargets[target]
+}
+
 func (g *GlobalContext) CertificateHostnames() []string {
 	g.certificateLock.Lock()
 	defer g.certificateLock.Unlock()
 
 	hostnames := []string{}
-	for _, cert := range g.Certificates {
-		hostnames = append(hostnames, cert.DNSNames...)
-		hostnames = append(hostnames, cert.Subject.CommonName)
+	for serial, cert := range g.Certificates {
+		// Skip certificates whose names are just the requested SNI echoed back
+		// by a dynamic issuer; they reveal no real hostnames and would only
+		// pollute the scan queue.
+		if g.IsReflectedCertificate(serial) {
+			continue
+		}
+		// DNS-type SAN entries may hold IP literals (e.g. "127.0.0.1" or
+		// "[::1]"); those are addresses, not hostnames, and must not be queued.
+		// Names are sanitized so malformed entries never pollute the queue.
 		for _, hostname := range cert.DNSNames {
-			g.DNSresolver.AddHostname(hostname)
+			name, ok := helpers.SanitizeHostname(hostname)
+			if !ok || helpers.IsIPLiteral(name) {
+				continue
+			}
+			hostnames = append(hostnames, name)
+			g.DNSresolver.AddHostname(name)
+		}
+		if cn, ok := helpers.SanitizeHostname(cert.Subject.CommonName); ok && !helpers.IsIPLiteral(cn) {
+			hostnames = append(hostnames, cn)
+		}
+		// Email domains and URI SAN hosts frequently name the device vendor or a
+		// management endpoint (e.g. a LANCOM router's info@lancom-systems.de) and
+		// are invisible to DNS-SAN-only parsing.
+		extra := append(helpers.CertEmailDomains(cert), helpers.CertURIHosts(cert)...)
+		for _, name := range extra {
+			if helpers.IsIPLiteral(name) {
+				continue
+			}
+			hostnames = append(hostnames, name)
+			g.DNSresolver.AddHostname(name)
 		}
 	}
 
@@ -81,6 +175,10 @@ func (g *GlobalContext) CertificateHostnames() []string {
 }
 
 func (g *GlobalContext) AddHeaderHost(host string) {
+	host, ok := helpers.SanitizeHostname(host)
+	if !ok {
+		return
+	}
 	g.headerLock.Lock()
 	defer g.headerLock.Unlock()
 	g.headerHosts = append(g.headerHosts, host)

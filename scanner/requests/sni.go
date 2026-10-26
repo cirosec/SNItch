@@ -1,6 +1,7 @@
 package requests
 
 import (
+	"context"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -14,49 +15,60 @@ import (
 
 // resolveTarget resolves the target through the application's DNS cache if the
 // host portion is a hostname rather than an IP. This ensures all connections use
-// cached/custom DNS results instead of falling back to the system resolver.
-func resolveTarget(resolver dns.DNSResolver, target string) string {
+// cached/custom DNS results instead of falling back to the system resolver. When
+// the resolver fails or returns no addresses, an error is returned instead of
+// silently dialing the raw hostname via the system resolver.
+func resolveTarget(resolver dns.DNSResolver, target string) (string, error) {
 	host, port, err := net.SplitHostPort(target)
 	if err != nil {
-		return target
+		return target, nil
 	}
 	if net.ParseIP(host) != nil {
-		return target // already an IP
+		return target, nil // already an IP
 	}
 	ips, err := resolver.Resolve(host)
-	if err != nil || len(ips) == 0 {
-		return target
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve %q: %w", host, err)
 	}
-	return net.JoinHostPort(ips[0].String(), port)
+	if len(ips) == 0 {
+		return "", fmt.Errorf("no addresses returned for %q", host)
+	}
+	return net.JoinHostPort(ips[0].String(), port), nil
 }
 
-// buildSNIExtension manually constructs an SNI extension with the given server name,
-// bypassing the IP address check that both stdlib and uTLS enforce.
-func buildSNIExtension(serverName string) *utls.GenericExtension {
+// buildSNIExtensionNames manually constructs an SNI extension encoding a proper
+// RFC 6066 ServerNameList with all given names, bypassing the IP address check
+// that both stdlib and uTLS enforce. An empty name is encoded as a zero-length
+// host_name entry.
+func buildSNIExtensionNames(names []string) *utls.GenericExtension {
 	// TLS extension structure for SNI (extension type 0x0000):
 	// - Server Name List Length (2 bytes)
+	//   repeated for every name:
 	//   - Server Name Type (1 byte): 0x00 = host_name
 	//   - Server Name Length (2 bytes)
 	//   - Server Name (variable)
-	nameBytes := []byte(serverName)
-	nameLen := len(nameBytes)
+	listLen := 0
+	for _, name := range names {
+		listLen += 1 + 2 + len(name)
+	}
 
-	// Server Name List: type(1) + length(2) + name(nameLen)
-	serverNameListLen := 1 + 2 + nameLen
 	// Extension data: list length(2) + server name list
-	extDataLen := 2 + serverNameListLen
-
-	data := make([]byte, extDataLen)
+	data := make([]byte, 2+listLen)
 	// Server Name List Length
-	data[0] = byte(serverNameListLen >> 8)
-	data[1] = byte(serverNameListLen)
-	// Server Name Type: host_name (0)
-	data[2] = 0
-	// Server Name Length
-	data[3] = byte(nameLen >> 8)
-	data[4] = byte(nameLen)
-	// Server Name
-	copy(data[5:], nameBytes)
+	data[0] = byte(listLen >> 8)
+	data[1] = byte(listLen)
+	offset := 2
+	for _, name := range names {
+		nameBytes := []byte(name)
+		// Server Name Type: host_name (0)
+		data[offset] = 0
+		// Server Name Length
+		data[offset+1] = byte(len(nameBytes) >> 8)
+		data[offset+2] = byte(len(nameBytes))
+		// Server Name
+		copy(data[offset+3:], nameBytes)
+		offset += 3 + len(nameBytes)
+	}
 
 	return &utls.GenericExtension{
 		Id:   0, // 0x0000 = server_name extension
@@ -64,13 +76,67 @@ func buildSNIExtension(serverName string) *utls.GenericExtension {
 	}
 }
 
-func MakeSNIRequest(resolver dns.DNSResolver, target, SNI string, timeout time.Duration, forceSNIextension bool) (*x509.Certificate, error) {
+// buildSNIExtension constructs a single-name SNI extension, preserving the
+// original zero-length host_name behavior for an empty serverName.
+func buildSNIExtension(serverName string) *utls.GenericExtension {
+	return buildSNIExtensionNames([]string{serverName})
+}
+
+// buildSNIExtensions returns the server_name extension(s) to include for the
+// given names. The extension is sent when forceExtension is set or any name is
+// non-empty. With duplicateExtension a second, identical extension is emitted.
+func buildSNIExtensions(names []string, forceExtension, duplicateExtension bool) []utls.TLSExtension {
+	send := forceExtension
+	for _, name := range names {
+		if name != "" {
+			send = true
+			break
+		}
+	}
+	if !send {
+		return nil
+	}
+	extensions := []utls.TLSExtension{buildSNIExtensionNames(names)}
+	if duplicateExtension {
+		extensions = append(extensions, buildSNIExtensionNames(names))
+	}
+	return extensions
+}
+
+// SNIRequestOptions controls the server_name extension sent in a crafted
+// ClientHello.
+type SNIRequestOptions struct {
+	Names              []string // Values placed in the RFC 6066 ServerNameList
+	ForceExtension     bool     // Send the extension even with empty/no names
+	DuplicateExtension bool     // Emit a second, identical server_name extension
+}
+
+// MakeSNIRequest preserves the original single-name API and delegates to
+// MakeSNIRequestOpts.
+func MakeSNIRequest(ctx context.Context, resolver dns.DNSResolver, target, SNI string, timeout time.Duration, forceSNIextension bool) (*x509.Certificate, error) {
+	return MakeSNIRequestOpts(ctx, resolver, target, SNIRequestOptions{
+		Names:          []string{SNI},
+		ForceExtension: forceSNIextension,
+	}, timeout)
+}
+
+func MakeSNIRequestOpts(ctx context.Context, resolver dns.DNSResolver, target string, opts SNIRequestOptions, timeout time.Duration) (*x509.Certificate, error) {
 	cfg := &utls.Config{
 		InsecureSkipVerify: true,
 		ServerName:         "dummy-value",
 	}
 
-	netConn, err := net.DialTimeout("tcp", resolveTarget(resolver, target), timeout)
+	deadline := time.Now().Add(timeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+
+	dialer := &net.Dialer{Timeout: timeout}
+	addr, resolveErr := resolveTarget(resolver, target)
+	if resolveErr != nil {
+		return nil, resolveErr
+	}
+	netConn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		_, err = ErrorHandlerConn(err)
 		return nil, err
@@ -80,10 +146,7 @@ func MakeSNIRequest(resolver dns.DNSResolver, target, SNI string, timeout time.D
 	conn := utls.UClient(netConn, cfg, utls.HelloCustom)
 	defer conn.Close()
 
-	extensions := []utls.TLSExtension{}
-	if SNI != "" || forceSNIextension{
-		extensions = append(extensions, buildSNIExtension(SNI))
-	}
+	extensions := buildSNIExtensions(opts.Names, opts.ForceExtension, opts.DuplicateExtension)
 	extensions = append(extensions,
 		&utls.SupportedVersionsExtension{Versions: []uint16{
 			utls.VersionTLS13, utls.VersionTLS12, utls.VersionTLS11, utls.VersionTLS10,
@@ -161,11 +224,11 @@ func MakeSNIRequest(resolver dns.DNSResolver, target, SNI string, timeout time.D
 		return nil, fmt.Errorf("failed to apply utls preset: %w", err)
 	}
 
-	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+	if err := conn.SetDeadline(deadline); err != nil {
 		return nil, err
 	}
 
-	if err := conn.Handshake(); err != nil {
+	if err := conn.HandshakeContext(ctx); err != nil {
 		_, err = ErrorHandlerConn(err)
 		return nil, err
 	}
