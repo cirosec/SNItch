@@ -1,5 +1,10 @@
 # SNItch
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/cirosec/snitch.svg)](https://pkg.go.dev/github.com/cirosec/snitch)
+[![Go Report Card](https://goreportcard.com/badge/github.com/cirosec/snitch)](https://goreportcard.com/report/github.com/cirosec/snitch)
+[![Release](https://img.shields.io/github/v/release/cirosec/SNItch.svg)](https://github.com/cirosec/SNItch/releases)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://github.com/cirosec/SNItch/blob/main/LICENSE)
+
 SNItch is an SNI-based virtual host (**vhost**) discovery tool for TLS-layer reconnaissance. It fuzzes the Server Name Indication (SNI) extension in TLS ClientHello messages to enumerate virtual hosts and find where FQDNs are really hosted — catching misconfigurations and unmanaged or hidden services that HTTP-layer tools like ffuf, gobuster, and wfuzz cannot overcome due to their architecture.
 
 Read more in the [blog post](https://cirosec.de/blog/snitch).
@@ -18,14 +23,17 @@ SNItch avoids both problems by establishing a fresh TLS handshake per candidate 
 Requires Go 1.26+.
 
 ```bash
-# From source (binary named SNItch)
+# From source: the binary is named SNItch
 git clone https://github.com/cirosec/SNItch.git
 cd SNItch
 go build -o SNItch .
 
-# Or install with Go (binary named lowercase "snitch")
+# Or install directly with Go: the binary is named lowercase "snitch",
+# because Go derives the name from the lowercase module path
 go install github.com/cirosec/snitch@latest
 ```
+
+The examples below use `SNItch`; substitute `snitch` if you installed with `go install`.
 
 ## Quick Start
 
