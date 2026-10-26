@@ -7,7 +7,7 @@
 
 SNItch is an SNI-based virtual host (**vhost**) discovery tool for TLS-layer reconnaissance. It fuzzes the Server Name Indication (SNI) extension in TLS ClientHello messages to enumerate virtual hosts and find where FQDNs are really hosted — catching misconfigurations and unmanaged or hidden services that HTTP-layer tools like ffuf, gobuster, and wfuzz cannot overcome due to their architecture.
 
-Read more in the [blog post](https://cirosec.de/blog/snitch).
+Read more in the [blog post](https://cirosec.de/en/news/fuzzing-vhosts-with-snitch/).
 
 ## Why SNItch?
 
